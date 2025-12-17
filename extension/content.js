@@ -51,77 +51,28 @@
     // =========================================================================
 
     /**
-     * Collection of selectors and detection strategies for identifying Twitch ads.
-     * Multiple fallback strategies are implemented due to Twitch's frequent DOM updates.
+     * Selectors are loaded from selectors.js (window.AdSelectors)
+     * This allows easy contribution of updated selectors when Twitch changes their DOM.
+     * See CONTRIBUTING.md for instructions on updating selectors.
      */
-    const adDetectors = {
-        /**
-         * Primary selectors for ad-related elements
-         * These are checked in order of reliability
-         */
-        selectors: [
-            // Ad banner/overlay elements
-            '[data-a-target="video-ad-label"]',
-            '[data-a-target="video-ad-countdown"]',
-            '[data-test-selector="ad-banner-default-text"]',
-            '[data-test-selector="video-ad-component"]',
-
-            // Ad countdown timer
-            '.video-ad-countdown',
-            '.ad-countdown',
-
-            // Player ad overlay containers
-            '[data-a-target="player-overlay-ad-banner"]',
-            '.player-ad-notice',
-            '.ad-banner',
-
-            // Purple "Ad" badge in player
-            '.tw-pill--ad',
-            '[data-test-selector="ad-pill"]'
-        ],
-
-        /**
-         * Class name patterns that indicate ad content
-         * Used as fallback when specific selectors fail
-         */
-        classPatterns: [
-            /^video-ad/i,
-            /^player-ad/i,
-            /ad-overlay/i,
-            /ad-banner/i,
-            /ad-countdown/i
-        ],
-
-        /**
-         * Data attribute patterns for ad detection
-         */
-        dataAttributePatterns: [
-            'data-ad-',
-            'data-video-ad',
-            'data-player-ad'
-        ],
-
-        /**
-         * Video player state attributes that may indicate ad playback
-         * Strategy 2: Check video element and player container state
-         */
-        playerStateIndicators: {
-            // Video element attributes that may change during ads
-            videoAttributes: [
-                'data-ad-playing',
-                'data-is-ad',
-                'data-ad-state'
-            ],
-            // Player container attributes
-            containerAttributes: [
-                'data-a-player-state',
-                'data-player-type',
-                'data-content-type'
-            ],
-            // Values that indicate ad playback
-            adStateValues: ['ad', 'advertisement', 'commercial', 'preroll', 'midroll']
-        }
+    const adDetectors = window.AdSelectors || {
+        // Fallback selectors if AdSelectors fails to load
+        selectors: [],
+        playerContainerSelectors: ['[data-a-target="video-player"]', '.video-player'],
+        classPatterns: [],
+        dataAttributePatterns: [],
+        videoAttributes: [],
+        containerAttributes: [],
+        adStateValues: [],
+        textIndicators: [],
+        monitoredAttributes: ['class', 'data-a-target', 'data-test-selector', 'style']
     };
+
+    if (!window.AdSelectors) {
+        console.warn('[Mute] AdSelectors not loaded, ad detection may not work correctly');
+    } else {
+        log('AdSelectors loaded, version:', adDetectors.version);
+    }
 
     /**
      * Tracks which detection strategy was used for the current ad
@@ -178,11 +129,11 @@
         const playerContainer = getVideoPlayerContainer();
         if (playerContainer) {
             // Check container attributes for ad state
-            for (const attrName of adDetectors.playerStateIndicators.containerAttributes) {
+            for (const attrName of adDetectors.containerAttributes) {
                 const attrValue = playerContainer.getAttribute(attrName);
                 if (attrValue) {
                     const lowerValue = attrValue.toLowerCase();
-                    for (const adValue of adDetectors.playerStateIndicators.adStateValues) {
+                    for (const adValue of adDetectors.adStateValues) {
                         if (lowerValue.includes(adValue)) {
                             log('Ad detected via player state attribute:', attrName + '=' + attrValue);
                             recordDetectionStrategy('playerState');
@@ -195,11 +146,11 @@
             // Check video element for ad state
             const videoElement = playerContainer.querySelector('video');
             if (videoElement) {
-                for (const attrName of adDetectors.playerStateIndicators.videoAttributes) {
+                for (const attrName of adDetectors.videoAttributes) {
                     const attrValue = videoElement.getAttribute(attrName);
                     if (attrValue) {
                         const lowerValue = attrValue.toLowerCase();
-                        if (lowerValue === 'true' || adDetectors.playerStateIndicators.adStateValues.some(function(v) { return lowerValue.includes(v); })) {
+                        if (lowerValue === 'true' || adDetectors.adStateValues.some(function(v) { return lowerValue.includes(v); })) {
                             log('Ad detected via video element attribute:', attrName + '=' + attrValue);
                             recordDetectionStrategy('playerState');
                             return true;
@@ -238,13 +189,7 @@
         }
 
         // Strategy 4: Check for text content indicating ads (last resort fallback)
-        const adTextIndicators = [
-            'Ad playing',
-            'Ad will end in',
-            'Your video will resume'
-        ];
-
-        for (const text of adTextIndicators) {
+        for (const text of adDetectors.textIndicators) {
             const xpath = `//*[contains(text(), '${text}')]`;
             const result = document.evaluate(
                 xpath,
@@ -273,17 +218,7 @@
      * @returns {Element|null} The video player container or null if not found
      */
     function getVideoPlayerContainer() {
-        // Primary player containers
-        const containerSelectors = [
-            '[data-a-target="video-player"]',
-            '.video-player',
-            '[data-a-target="player-overlay-click-handler"]',
-            '.persistent-player',
-            '.video-player__container',
-            '#video-player'
-        ];
-
-        for (const selector of containerSelectors) {
+        for (const selector of adDetectors.playerContainerSelectors) {
             const container = document.querySelector(selector);
             if (container) {
                 return container;
@@ -392,7 +327,7 @@
                 childList: true,
                 subtree: true,
                 attributes: true,
-                attributeFilter: ['class', 'data-a-target', 'data-test-selector', 'style']
+                attributeFilter: adDetectors.monitoredAttributes
             });
 
             // Perform initial check

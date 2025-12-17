@@ -30,7 +30,7 @@
   "content_scripts": [
     {
       "matches": ["*://*.twitch.tv/*", "*://player.twitch.tv/*"],
-      "js": ["content.js"],
+      "js": ["selectors.js", "content.js"],
       "run_at": "document_end",
       "all_frames": true
     }
