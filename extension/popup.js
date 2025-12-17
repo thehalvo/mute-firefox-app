@@ -13,6 +13,11 @@
     const retryButton = document.getElementById('retry-button');
     const setupSection = document.getElementById('setup-section');
     const connectedSection = document.getElementById('connected-section');
+    const degradedSection = document.getElementById('degraded-section');
+    const exitDegradedButton = document.getElementById('exit-degraded-button');
+    const muteStateSection = document.getElementById('mute-state-section');
+    const muteTrackingStatus = document.getElementById('mute-tracking-status');
+    const resetMuteStateButton = document.getElementById('reset-mute-state-button');
 
     /**
      * Updates the UI based on connection status
@@ -24,9 +29,16 @@
 
         switch (status.status) {
             case 'connected':
-                statusIndicator.textContent = 'Connected';
-                statusIndicator.classList.add('connected');
-                showConnectedState();
+                // Check if in degraded mode even when "connected"
+                if (status.degradedMode) {
+                    statusIndicator.textContent = 'Degraded';
+                    statusIndicator.classList.add('disconnected');
+                    showDegradedState(status);
+                } else {
+                    statusIndicator.textContent = 'Connected';
+                    statusIndicator.classList.add('connected');
+                    showConnectedState(status);
+                }
                 break;
 
             case 'connecting':
@@ -56,11 +68,16 @@
 
     /**
      * Shows the connected state UI
+     * @param {Object} status - Connection status
      */
-    function showConnectedState() {
+    function showConnectedState(status) {
         errorSection.classList.add('hidden');
         setupSection.classList.add('hidden');
+        degradedSection.classList.add('hidden');
         connectedSection.classList.remove('hidden');
+
+        // Show mute state section when connected
+        updateMuteStateDisplay(status);
     }
 
     /**
@@ -70,6 +87,8 @@
     function showConnectingState(status) {
         connectedSection.classList.add('hidden');
         setupSection.classList.add('hidden');
+        degradedSection.classList.add('hidden');
+        muteStateSection.classList.add('hidden');
 
         if (status.reconnectAttempts > 0) {
             errorSection.classList.remove('hidden');
@@ -88,6 +107,8 @@
      */
     function showDisconnectedState(status) {
         connectedSection.classList.add('hidden');
+        degradedSection.classList.add('hidden');
+        muteStateSection.classList.add('hidden');
         errorSection.classList.remove('hidden');
 
         if (status.lastError) {
@@ -113,8 +134,10 @@
      */
     function showErrorState(status) {
         connectedSection.classList.add('hidden');
+        degradedSection.classList.add('hidden');
         errorSection.classList.remove('hidden');
         setupSection.classList.remove('hidden');
+        muteStateSection.classList.add('hidden');
 
         if (status.lastError) {
             errorText.textContent = status.lastError;
@@ -124,6 +147,40 @@
 
         retryButton.disabled = false;
         retryButton.textContent = 'Retry Connection';
+    }
+
+    /**
+     * Shows the degraded mode UI
+     * @param {Object} status - Connection status
+     */
+    function showDegradedState(status) {
+        connectedSection.classList.add('hidden');
+        errorSection.classList.add('hidden');
+        setupSection.classList.add('hidden');
+        degradedSection.classList.remove('hidden');
+
+        // Show mute state section in degraded mode too
+        updateMuteStateDisplay(status);
+    }
+
+    /**
+     * Updates the mute state display
+     * @param {Object} status - Connection status
+     */
+    function updateMuteStateDisplay(status) {
+        if (!muteStateSection || !muteTrackingStatus) {
+            return;
+        }
+
+        muteStateSection.classList.remove('hidden');
+
+        if (status.extensionInitiatedMute) {
+            muteTrackingStatus.textContent = 'Active (extension muted)';
+            muteTrackingStatus.className = 'state-value active';
+        } else {
+            muteTrackingStatus.textContent = 'Inactive';
+            muteTrackingStatus.className = 'state-value inactive';
+        }
     }
 
     /**
@@ -165,11 +222,69 @@
     }
 
     /**
+     * Handles the exit degraded mode button click
+     */
+    function handleExitDegradedClick() {
+        if (exitDegradedButton) {
+            exitDegradedButton.disabled = true;
+            exitDegradedButton.textContent = 'Reconnecting...';
+        }
+
+        browser.runtime.sendMessage({ action: 'retryConnection' })
+            .then(function() {
+                setTimeout(fetchStatus, 500);
+            })
+            .catch(function(error) {
+                console.error('[Mute Popup] Failed to exit degraded mode:', error);
+                if (exitDegradedButton) {
+                    exitDegradedButton.disabled = false;
+                    exitDegradedButton.textContent = 'Try Reconnecting';
+                }
+            });
+    }
+
+    /**
+     * Handles the reset mute state button click
+     */
+    function handleResetMuteStateClick() {
+        if (resetMuteStateButton) {
+            resetMuteStateButton.disabled = true;
+            resetMuteStateButton.textContent = 'Resetting...';
+        }
+
+        browser.runtime.sendMessage({ action: 'resetMuteState' })
+            .then(function() {
+                setTimeout(function() {
+                    fetchStatus();
+                    if (resetMuteStateButton) {
+                        resetMuteStateButton.disabled = false;
+                        resetMuteStateButton.textContent = 'Reset Mute Tracking';
+                    }
+                }, 300);
+            })
+            .catch(function(error) {
+                console.error('[Mute Popup] Failed to reset mute state:', error);
+                if (resetMuteStateButton) {
+                    resetMuteStateButton.disabled = false;
+                    resetMuteStateButton.textContent = 'Reset Mute Tracking';
+                }
+            });
+    }
+
+    /**
      * Initializes the popup
      */
     function init() {
         // Attach event listeners
         retryButton.addEventListener('click', handleRetryClick);
+
+        if (exitDegradedButton) {
+            exitDegradedButton.addEventListener('click', handleExitDegradedClick);
+        }
+
+        if (resetMuteStateButton) {
+            resetMuteStateButton.addEventListener('click', handleResetMuteStateClick);
+        }
 
         // Fetch initial status
         fetchStatus();

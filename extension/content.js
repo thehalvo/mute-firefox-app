@@ -99,7 +99,43 @@
             'data-ad-',
             'data-video-ad',
             'data-player-ad'
-        ]
+        ],
+
+        /**
+         * Video player state attributes that may indicate ad playback
+         * Strategy 2: Check video element and player container state
+         */
+        playerStateIndicators: {
+            // Video element attributes that may change during ads
+            videoAttributes: [
+                'data-ad-playing',
+                'data-is-ad',
+                'data-ad-state'
+            ],
+            // Player container attributes
+            containerAttributes: [
+                'data-a-player-state',
+                'data-player-type',
+                'data-content-type'
+            ],
+            // Values that indicate ad playback
+            adStateValues: ['ad', 'advertisement', 'commercial', 'preroll', 'midroll']
+        }
+    };
+
+    /**
+     * Tracks which detection strategy was used for the current ad
+     * Used for logging and debugging
+     */
+    const detectionStats = {
+        lastStrategy: null,
+        strategyUsage: {
+            selector: 0,
+            classPattern: 0,
+            dataAttribute: 0,
+            playerState: 0,
+            textContent: 0
+        }
     };
 
     // =========================================================================
@@ -107,21 +143,73 @@
     // =========================================================================
 
     /**
+     * Records which detection strategy was used
+     * @param {string} strategy - Name of the strategy used
+     */
+    function recordDetectionStrategy(strategy) {
+        if (detectionStats.lastStrategy !== strategy) {
+            detectionStats.lastStrategy = strategy;
+            detectionStats.strategyUsage[strategy]++;
+
+            // Log when falling back to non-primary strategies
+            if (strategy !== 'selector') {
+                console.log('[Mute] Ad detected using fallback strategy:', strategy);
+            }
+        }
+    }
+
+    /**
      * Checks if any ad-related elements are present in the DOM
+     * Uses multiple detection strategies with fallbacks
      * @returns {boolean} True if an ad is detected
      */
     function checkForAdElements() {
-        // Strategy 1: Check specific selectors
+        // Strategy 1: Check specific selectors (primary strategy)
         for (const selector of adDetectors.selectors) {
             const element = document.querySelector(selector);
             if (element) {
                 log('Ad detected via selector:', selector);
+                recordDetectionStrategy('selector');
                 return true;
             }
         }
 
-        // Strategy 2: Check for elements with ad-related class patterns
+        // Strategy 2: Check video player state attributes
         const playerContainer = getVideoPlayerContainer();
+        if (playerContainer) {
+            // Check container attributes for ad state
+            for (const attrName of adDetectors.playerStateIndicators.containerAttributes) {
+                const attrValue = playerContainer.getAttribute(attrName);
+                if (attrValue) {
+                    const lowerValue = attrValue.toLowerCase();
+                    for (const adValue of adDetectors.playerStateIndicators.adStateValues) {
+                        if (lowerValue.includes(adValue)) {
+                            log('Ad detected via player state attribute:', attrName + '=' + attrValue);
+                            recordDetectionStrategy('playerState');
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // Check video element for ad state
+            const videoElement = playerContainer.querySelector('video');
+            if (videoElement) {
+                for (const attrName of adDetectors.playerStateIndicators.videoAttributes) {
+                    const attrValue = videoElement.getAttribute(attrName);
+                    if (attrValue) {
+                        const lowerValue = attrValue.toLowerCase();
+                        if (lowerValue === 'true' || adDetectors.playerStateIndicators.adStateValues.some(function(v) { return lowerValue.includes(v); })) {
+                            log('Ad detected via video element attribute:', attrName + '=' + attrValue);
+                            recordDetectionStrategy('playerState');
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Strategy 3: Check for elements with ad-related class patterns
         if (playerContainer) {
             const allElements = playerContainer.querySelectorAll('*');
             for (const element of allElements) {
@@ -130,6 +218,7 @@
                     for (const pattern of adDetectors.classPatterns) {
                         if (pattern.test(element.className)) {
                             log('Ad detected via class pattern:', element.className);
+                            recordDetectionStrategy('classPattern');
                             return true;
                         }
                     }
@@ -140,6 +229,7 @@
                     for (const pattern of adDetectors.dataAttributePatterns) {
                         if (attr.name.includes(pattern)) {
                             log('Ad detected via data attribute:', attr.name);
+                            recordDetectionStrategy('dataAttribute');
                             return true;
                         }
                     }
@@ -147,7 +237,7 @@
             }
         }
 
-        // Strategy 3: Check for text content indicating ads
+        // Strategy 4: Check for text content indicating ads (last resort fallback)
         const adTextIndicators = [
             'Ad playing',
             'Ad will end in',
@@ -165,8 +255,14 @@
             );
             if (result.singleNodeValue) {
                 log('Ad detected via text content:', text);
+                recordDetectionStrategy('textContent');
                 return true;
             }
+        }
+
+        // Reset last strategy when no ad is detected
+        if (detectionStats.lastStrategy !== null) {
+            detectionStats.lastStrategy = null;
         }
 
         return false;
@@ -486,32 +582,74 @@
     // =========================================================================
 
     /**
+     * Determines the type of content on the current page
+     * @returns {Object} Content type information
+     */
+    function getContentType() {
+        const url = window.location.href;
+        const hostname = window.location.hostname;
+
+        // Embedded player on third-party sites
+        const isEmbeddedPlayer = hostname === 'player.twitch.tv';
+
+        // Stream pages: twitch.tv/username (not followed by /videos, /clips, /about, etc.)
+        const streamPattern = /^https?:\/\/(?:www\.)?twitch\.tv\/([a-zA-Z0-9_]+)\/?$/;
+
+        // VOD pages: twitch.tv/videos/123456
+        const vodPattern = /^https?:\/\/(?:www\.)?twitch\.tv\/videos\/\d+/;
+
+        // Clip pages: twitch.tv/username/clip/clipname or clips.twitch.tv
+        const clipPattern = /^https?:\/\/(?:www\.)?twitch\.tv\/[a-zA-Z0-9_]+\/clip\//;
+        const clipsSubdomain = hostname === 'clips.twitch.tv';
+
+        // Channel sub-paths that may have video
+        const channelWithPathPattern = /^https?:\/\/(?:www\.)?twitch\.tv\/([a-zA-Z0-9_]+)\/(?!videos|clips|about|schedule)/;
+
+        return {
+            isEmbedded: isEmbeddedPlayer,
+            isStream: streamPattern.test(url),
+            isVOD: vodPattern.test(url),
+            isClip: clipPattern.test(url) || clipsSubdomain,
+            isChannelWithPath: channelWithPathPattern.test(url),
+            url: url,
+            hostname: hostname
+        };
+    }
+
+    /**
      * Determines if the current page is a stream or VOD page
      * @returns {boolean} True if this is a watchable content page
      */
     function isWatchablePage() {
-        const url = window.location.href;
+        const contentType = getContentType();
 
-        // Stream pages: twitch.tv/username (not followed by /videos, /clips, /about, etc.)
-        // VOD pages: twitch.tv/videos/123456
-        // Clip pages: twitch.tv/username/clip/clipname
-
-        const streamPattern = /^https?:\/\/(?:www\.)?twitch\.tv\/([a-zA-Z0-9_]+)\/?$/;
-        const vodPattern = /^https?:\/\/(?:www\.)?twitch\.tv\/videos\/\d+/;
-        const channelWithPathPattern = /^https?:\/\/(?:www\.)?twitch\.tv\/([a-zA-Z0-9_]+)\/(?!videos|clips|about|schedule)/;
-
-        // Allow VODs as they can have ads
-        if (vodPattern.test(url)) {
+        // Embedded players always need monitoring (ads can appear in embeds)
+        if (contentType.isEmbedded) {
+            log('Embedded player detected');
             return true;
         }
 
-        // Allow direct channel pages (streams)
-        if (streamPattern.test(url)) {
+        // VODs can have pre-roll and mid-roll ads
+        if (contentType.isVOD) {
+            log('VOD page detected');
             return true;
         }
 
-        // Allow certain sub-paths that may have video
-        if (channelWithPathPattern.test(url)) {
+        // Live streams have pre-roll and mid-roll ads
+        if (contentType.isStream) {
+            log('Stream page detected');
+            return true;
+        }
+
+        // Clips typically do not have ads, but monitor anyway for edge cases
+        if (contentType.isClip) {
+            log('Clip page detected - monitoring for potential ads');
+            return true;
+        }
+
+        // Other channel sub-paths that may have video content
+        if (contentType.isChannelWithPath) {
+            log('Channel sub-path with potential video detected');
             return true;
         }
 

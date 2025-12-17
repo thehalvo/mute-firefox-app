@@ -64,6 +64,30 @@
         lastError: null
     };
 
+    // =========================================================================
+    // Mute State Tracking
+    // =========================================================================
+
+    /**
+     * Tracks mute state to prevent unmuting user-initiated mutes
+     */
+    const muteState = {
+        // Whether the extension initiated the current mute
+        extensionInitiatedMute: false,
+        // Whether we're waiting for a status response before muting
+        pendingMuteCheck: false,
+        // The system mute state before we muted (for restoration)
+        preMuteState: null,
+        // Count of failed operations to avoid repeated failures
+        failedOperations: 0,
+        // Max consecutive failures before entering degraded mode
+        maxFailedOperations: 5,
+        // Whether we're in degraded mode (native host unavailable)
+        degradedMode: false,
+        // Tab ID for tab mute fallback
+        activeTabId: null
+    };
+
     // Reconnection configuration
     const RECONNECT_INITIAL_DELAY_MS = 1000;
     const RECONNECT_MAX_DELAY_MS = 30000;
@@ -216,16 +240,56 @@
     function handleNativeMessage(message) {
         log('Received message from native host:', message);
 
+        // Reset failed operations counter on successful communication
+        muteState.failedOperations = 0;
+
         if (message.success !== undefined) {
             if (message.success) {
                 log('Command executed successfully');
             } else {
                 logError('Command failed:', message.error);
+                muteState.failedOperations++;
             }
         }
 
         if (message.muted !== undefined) {
             log('Current mute status:', message.muted);
+
+            // Handle pending mute check
+            if (muteState.pendingMuteCheck) {
+                muteState.pendingMuteCheck = false;
+                muteState.preMuteState = message.muted;
+
+                if (message.muted) {
+                    // System is already muted by user, do not override
+                    logState('System already muted by user, skipping extension mute');
+                    muteState.extensionInitiatedMute = false;
+                } else {
+                    // System is not muted, proceed with muting
+                    logState('System not muted, proceeding with extension mute');
+                    muteState.extensionInitiatedMute = true;
+                    sendCommandToNativeHostDirect('mute');
+                }
+            }
+        }
+    }
+
+    /**
+     * Sends a command directly to native host without state tracking
+     * Used internally after state checks are complete
+     * @param {string} command - Command to send
+     */
+    function sendCommandToNativeHostDirect(command) {
+        const message = { command: command };
+
+        if (connectionState.isConnected && connectionState.port) {
+            try {
+                log('Sending direct command to native host:', command);
+                connectionState.port.postMessage(message);
+            } catch (error) {
+                logError('Failed to send direct command:', error.message);
+                muteState.failedOperations++;
+            }
         }
     }
 
@@ -365,6 +429,90 @@
     }
 
     /**
+     * Handles mute request with user state preservation
+     * First queries mute status, then only mutes if system is not already muted
+     * @param {Object} sender - Sender information for tab mute fallback
+     */
+    function handleMuteRequest(sender) {
+        // Track the tab for potential fallback
+        if (sender && sender.tab) {
+            muteState.activeTabId = sender.tab.id;
+        }
+
+        // Check if we're in degraded mode (too many failures)
+        if (muteState.degradedMode || muteState.failedOperations >= muteState.maxFailedOperations) {
+            logState('In degraded mode, using tab mute fallback');
+            muteState.degradedMode = true;
+            muteTabFallback(true);
+            return;
+        }
+
+        // Check if native host is connected
+        if (!connectionState.isConnected || !connectionState.port) {
+            logState('Native host not connected, attempting connection and using tab mute fallback');
+            connectToNativeHost();
+            muteTabFallback(true);
+            return;
+        }
+
+        // Query current mute status before muting
+        logState('Checking system mute status before muting');
+        muteState.pendingMuteCheck = true;
+        sendCommandToNativeHost('getStatus');
+    }
+
+    /**
+     * Handles unmute request with user state preservation
+     * Only unmutes if the extension initiated the mute
+     * @param {Object} sender - Sender information for tab mute fallback
+     */
+    function handleUnmuteRequest(sender) {
+        // Handle tab mute fallback if we're in degraded mode
+        if (muteState.degradedMode) {
+            muteTabFallback(false);
+            muteState.extensionInitiatedMute = false;
+            return;
+        }
+
+        // Only unmute if we were the ones who muted
+        if (!muteState.extensionInitiatedMute) {
+            logState('Extension did not initiate mute, skipping unmute (preserving user mute state)');
+            return;
+        }
+
+        // Check if native host is connected
+        if (!connectionState.isConnected || !connectionState.port) {
+            logState('Native host not connected, using tab unmute fallback');
+            muteTabFallback(false);
+            muteState.extensionInitiatedMute = false;
+            return;
+        }
+
+        logState('Extension initiated mute detected, sending unmute command');
+        sendCommandToNativeHost('unmute');
+        muteState.extensionInitiatedMute = false;
+    }
+
+    /**
+     * Mutes or unmutes the active tab as a fallback when native host is unavailable
+     * @param {boolean} mute - True to mute, false to unmute
+     */
+    function muteTabFallback(mute) {
+        if (!muteState.activeTabId) {
+            log('No active tab ID for fallback mute');
+            return;
+        }
+
+        browser.tabs.update(muteState.activeTabId, { muted: mute })
+            .then(function() {
+                logState('Tab mute fallback ' + (mute ? 'muted' : 'unmuted') + ' tab ' + muteState.activeTabId);
+            })
+            .catch(function(error) {
+                logError('Tab mute fallback failed:', error.message);
+            });
+    }
+
+    /**
      * Handles messages from content scripts and popup
      * @param {Object} message - Message from content script or popup
      * @param {Object} sender - Sender information
@@ -381,13 +529,13 @@
 
         switch (message.action) {
             case 'mute':
-                logState('Sending mute command to native host');
-                sendCommandToNativeHost('mute');
+                logState('Mute request received');
+                handleMuteRequest(sender);
                 break;
 
             case 'unmute':
-                logState('Sending unmute command to native host');
-                sendCommandToNativeHost('unmute');
+                logState('Unmute request received');
+                handleUnmuteRequest(sender);
                 break;
 
             case 'getStatus':
@@ -402,7 +550,9 @@
                     isConnected: connectionState.isConnected,
                     reconnectAttempts: connectionState.reconnectAttempts,
                     maxReconnectAttempts: RECONNECT_MAX_ATTEMPTS,
-                    lastError: connectionState.lastError
+                    lastError: connectionState.lastError,
+                    degradedMode: muteState.degradedMode,
+                    extensionInitiatedMute: muteState.extensionInitiatedMute
                 });
                 return true;
 
@@ -411,7 +561,18 @@
                 logState('Manual retry connection requested');
                 connectionState.reconnectAttempts = 0;
                 connectionState.lastError = null;
+                muteState.failedOperations = 0;
+                muteState.degradedMode = false;
                 connectToNativeHost();
+                sendResponse({ success: true });
+                return true;
+
+            case 'resetMuteState':
+                // Allow manual reset of mute state tracking
+                logState('Manual mute state reset requested');
+                muteState.extensionInitiatedMute = false;
+                muteState.pendingMuteCheck = false;
+                muteState.preMuteState = null;
                 sendResponse({ success: true });
                 return true;
 

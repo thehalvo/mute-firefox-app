@@ -44,6 +44,21 @@
       <p class="info-text">Navigate to a Twitch stream to enable automatic ad muting.</p>
     </section>
 
+    <section id="degraded-section" class="degraded-section hidden">
+      <h2>Degraded Mode Active</h2>
+      <p>The native host is unavailable. Using browser tab muting as a fallback.</p>
+      <p class="info-text-small">Tab muting only affects the browser tab, not system-wide audio.</p>
+      <button id="exit-degraded-button" class="secondary-button">Try Reconnecting</button>
+    </section>
+
+    <section id="mute-state-section" class="mute-state-section hidden">
+      <div class="state-info">
+        <span class="state-label">Mute Tracking:</span>
+        <span id="mute-tracking-status" class="state-value">Inactive</span>
+      </div>
+      <button id="reset-mute-state-button" class="secondary-button small-button">Reset Mute Tracking</button>
+    </section>
+
     <footer class="popup-footer">
       <p class="version">v1.0.0</p>
     </footer>
