@@ -1,0 +1,7 @@
+{
+  "name": "com.twitchadmuter.host",
+  "description": "Native messaging host for Twitch Ad Muter - controls macOS system audio mute",
+  "path": "/PLACEHOLDER/PATH/TO/twitch_ad_muter_host.py",
+  "type": "stdio",
+  "allowed_extensions": ["mute@twitchadmuter.com"]
+}
