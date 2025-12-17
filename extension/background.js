@@ -125,26 +125,22 @@
                 break;
 
             case STATUS.CONNECTING:
-                browser.browserAction.setBadgeText({ text: '...' });
-                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_WARNING });
+                browser.browserAction.setBadgeText({ text: '' });
                 browser.browserAction.setTitle({ title: 'Mute - Connecting...' });
                 break;
 
             case STATUS.DISCONNECTED:
-                browser.browserAction.setBadgeText({ text: '!' });
-                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_WARNING });
+                browser.browserAction.setBadgeText({ text: '' });
                 browser.browserAction.setTitle({ title: 'Mute - Disconnected' });
                 break;
 
             case STATUS.ERROR:
-                browser.browserAction.setBadgeText({ text: '!' });
-                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_ERROR });
+                browser.browserAction.setBadgeText({ text: '' });
                 browser.browserAction.setTitle({ title: 'Mute - Setup Required' });
                 break;
 
             default:
-                browser.browserAction.setBadgeText({ text: '?' });
-                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_WARNING });
+                browser.browserAction.setBadgeText({ text: '' });
                 browser.browserAction.setTitle({ title: 'Mute - Unknown Status' });
         }
     }
