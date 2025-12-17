@@ -249,48 +249,6 @@ body {
   font-style: italic;
 }
 
-/* Mute State Section */
-.mute-state-section {
-  background: rgba(39, 39, 42, 0.6);
-  border: 1px solid rgba(63, 63, 70, 0.5);
-  border-radius: 10px;
-  padding: 14px;
-  margin-bottom: 16px;
-}
-
-.state-info {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.state-label {
-  font-size: 12px;
-  color: #71717a;
-  font-weight: 500;
-}
-
-.state-value {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 20px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.state-value.active {
-  background: rgba(145, 70, 255, 0.15);
-  color: #bf94ff;
-  box-shadow: 0 0 10px rgba(145, 70, 255, 0.15);
-}
-
-.state-value.inactive {
-  background: rgba(63, 63, 70, 0.5);
-  color: #71717a;
-}
-
 /* Secondary Button */
 .secondary-button {
   width: 100%;
@@ -319,11 +277,6 @@ body {
   color: #52525b;
   border-color: #3f3f46;
   cursor: not-allowed;
-}
-
-.secondary-button.small-button {
-  padding: 6px 14px;
-  font-size: 12px;
 }
 
 /* Footer */
