@@ -59,13 +59,71 @@
         isConnected: false,
         reconnectAttempts: 0,
         reconnectTimer: null,
-        pendingMessages: []
+        pendingMessages: [],
+        currentStatus: 'disconnected',
+        lastError: null
     };
 
     // Reconnection configuration
     const RECONNECT_INITIAL_DELAY_MS = 1000;
     const RECONNECT_MAX_DELAY_MS = 30000;
     const RECONNECT_MAX_ATTEMPTS = 10;
+
+    // Badge colors
+    const BADGE_COLOR_ERROR = '#D93025';
+    const BADGE_COLOR_WARNING = '#F9AB00';
+    const BADGE_COLOR_OK = '#34A853';
+
+    // Connection status for popup queries
+    const STATUS = {
+        CONNECTED: 'connected',
+        DISCONNECTED: 'disconnected',
+        CONNECTING: 'connecting',
+        ERROR: 'error'
+    };
+
+    // =========================================================================
+    // Badge Management
+    // =========================================================================
+
+    /**
+     * Updates the browser action badge to indicate connection status
+     * @param {string} status - Current connection status
+     */
+    function updateBadge(status) {
+        connectionState.currentStatus = status;
+
+        switch (status) {
+            case STATUS.CONNECTED:
+                browser.browserAction.setBadgeText({ text: '' });
+                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_OK });
+                browser.browserAction.setTitle({ title: 'Mute - Connected' });
+                break;
+
+            case STATUS.CONNECTING:
+                browser.browserAction.setBadgeText({ text: '...' });
+                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_WARNING });
+                browser.browserAction.setTitle({ title: 'Mute - Connecting...' });
+                break;
+
+            case STATUS.DISCONNECTED:
+                browser.browserAction.setBadgeText({ text: '!' });
+                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_WARNING });
+                browser.browserAction.setTitle({ title: 'Mute - Disconnected' });
+                break;
+
+            case STATUS.ERROR:
+                browser.browserAction.setBadgeText({ text: '!' });
+                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_ERROR });
+                browser.browserAction.setTitle({ title: 'Mute - Setup Required' });
+                break;
+
+            default:
+                browser.browserAction.setBadgeText({ text: '?' });
+                browser.browserAction.setBadgeBackgroundColor({ color: BADGE_COLOR_WARNING });
+                browser.browserAction.setTitle({ title: 'Mute - Unknown Status' });
+        }
+    }
 
     // =========================================================================
     // Native Host Connection
@@ -105,17 +163,21 @@
             return true;
         }
 
+        updateBadge(STATUS.CONNECTING);
+
         try {
             logState('Attempting to connect to native host: ' + NATIVE_HOST_NAME);
 
             connectionState.port = browser.runtime.connectNative(NATIVE_HOST_NAME);
             connectionState.isConnected = true;
+            connectionState.lastError = null;
 
             // Set up port event listeners
             setupPortListeners();
 
             logState('Native host connection established');
             resetReconnectState();
+            updateBadge(STATUS.CONNECTED);
 
             // Process any pending messages
             processPendingMessages();
@@ -125,6 +187,8 @@
             logError('Failed to connect to native host:', error.message);
             connectionState.isConnected = false;
             connectionState.port = null;
+            connectionState.lastError = error.message;
+            updateBadge(STATUS.ERROR);
             scheduleReconnect();
             return false;
         }
@@ -177,12 +241,16 @@
 
         if (error) {
             logError('Native host disconnected with error:', error.message);
+            connectionState.lastError = error.message;
         } else if (lastError) {
             logError('Native host disconnected:', lastError.message);
+            connectionState.lastError = lastError.message;
         } else {
             logState('Native host disconnected');
+            connectionState.lastError = 'Connection lost';
         }
 
+        updateBadge(STATUS.DISCONNECTED);
         scheduleReconnect();
     }
 
@@ -200,6 +268,8 @@
         if (connectionState.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
             logError('Max reconnection attempts reached. Native host may not be installed.');
             logError('Please run the install script to set up the native messaging host.');
+            connectionState.lastError = 'Native host not installed or not responding. Please run the install script.';
+            updateBadge(STATUS.ERROR);
             return;
         }
 
@@ -295,14 +365,14 @@
     }
 
     /**
-     * Handles messages from content scripts
-     * @param {Object} message - Message from content script
+     * Handles messages from content scripts and popup
+     * @param {Object} message - Message from content script or popup
      * @param {Object} sender - Sender information
      * @param {Function} sendResponse - Response callback
      * @returns {boolean} True to indicate async response
      */
     function handleContentScriptMessage(message, sender, sendResponse) {
-        log('Received message from content script:', message);
+        log('Received message:', message);
 
         if (!message || !message.action) {
             log('Invalid message received, missing action');
@@ -324,6 +394,26 @@
                 log('Requesting status from native host');
                 sendCommandToNativeHost('getStatus');
                 break;
+
+            case 'getConnectionStatus':
+                // Return current connection status to the popup
+                sendResponse({
+                    status: connectionState.currentStatus,
+                    isConnected: connectionState.isConnected,
+                    reconnectAttempts: connectionState.reconnectAttempts,
+                    maxReconnectAttempts: RECONNECT_MAX_ATTEMPTS,
+                    lastError: connectionState.lastError
+                });
+                return true;
+
+            case 'retryConnection':
+                // Reset reconnect state and attempt connection
+                logState('Manual retry connection requested');
+                connectionState.reconnectAttempts = 0;
+                connectionState.lastError = null;
+                connectToNativeHost();
+                sendResponse({ success: true });
+                return true;
 
             default:
                 log('Unknown action:', message.action);

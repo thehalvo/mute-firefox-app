@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mute - Twitch Ad Muter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <header class="popup-header">
+      <h1>Mute</h1>
+      <p class="subtitle">Twitch Ad Muter</p>
+    </header>
+
+    <section class="status-section">
+      <div class="status-row">
+        <span class="status-label">Status:</span>
+        <span id="status-indicator" class="status-indicator">Checking...</span>
+      </div>
+    </section>
+
+    <section id="error-section" class="error-section hidden">
+      <div class="error-message">
+        <span id="error-text"></span>
+      </div>
+      <button id="retry-button" class="retry-button">Retry Connection</button>
+    </section>
+
+    <section id="setup-section" class="setup-section hidden">
+      <h2>Setup Required</h2>
+      <p>The native messaging host is not installed. Follow these steps:</p>
+      <ol class="setup-steps">
+        <li>Open Terminal</li>
+        <li>Navigate to the project's <code>install</code> directory</li>
+        <li>Run: <code>./install.sh</code></li>
+        <li>Restart Firefox</li>
+        <li>Click "Retry Connection" above</li>
+      </ol>
+    </section>
+
+    <section id="connected-section" class="connected-section hidden">
+      <p class="success-message">Native host connected. Ad muting is active.</p>
+      <p class="info-text">Navigate to a Twitch stream to enable automatic ad muting.</p>
+    </section>
+
+    <footer class="popup-footer">
+      <p class="version">v1.0.0</p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
