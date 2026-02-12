@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "Mute",
   "version": "1.0.0",
-  "description": "Automatically mutes system audio during Twitch ads",
+  "description": "Automatically mutes system audio during Twitch and Peacock ads",
   "browser_specific_settings": {
     "gecko": {
       "id": "mute@twitchadmuter.com",
@@ -12,8 +12,13 @@
   "permissions": [
     "nativeMessaging",
     "tabs",
+    "webRequest",
     "*://*.twitch.tv/*",
-    "*://player.twitch.tv/*"
+    "*://player.twitch.tv/*",
+    "*://*.peacocktv.com/*",
+    "*://*.fwmrm.net/*",
+    "*://*.moatads.com/*",
+    "*://*.doubleverify.com/*"
   ],
   "icons": {
     "48": "icons/icon-48.png",
@@ -24,7 +29,7 @@
       "48": "icons/icon-48.png",
       "96": "icons/icon-96.png"
     },
-    "default_title": "Mute - Twitch Ad Muter",
+    "default_title": "Mute - Ad Muter",
     "default_popup": "popup.html"
   },
   "content_scripts": [

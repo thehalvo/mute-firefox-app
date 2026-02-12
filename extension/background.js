@@ -1,14 +1,18 @@
 /**
  * Mute - Background Script
- * Manages native host connection and message routing between content scripts
- * and the native messaging host for system audio control.
+ * Manages native host connection and message routing between content scripts,
+ * network-based ad detection, and the native messaging host for system audio control.
+ *
+ * Supports two detection strategies:
+ * - Twitch: DOM-based detection via content scripts (MutationObserver + CSS selectors)
+ * - Peacock: Network-based detection via webRequest API (SSAI ad tracking beacons)
  */
 
 (function() {
     'use strict';
 
     const NATIVE_HOST_NAME = 'com.twitchadmuter.host';
-    const DEBUG = false;
+    const DEBUG = true;
 
     // =========================================================================
     // Logging
@@ -69,13 +73,19 @@
     // =========================================================================
 
     /**
-     * Tracks mute state to prevent unmuting user-initiated mutes
+     * Tracks mute state to prevent unmuting user-initiated mutes.
+     * Uses reference-counted activeMuteSources to support simultaneous
+     * mute requests from multiple sources (e.g. Twitch tab + Peacock tab).
+     * System mutes on first source added, unmutes when all sources removed.
      */
     const muteState = {
-        // Whether the extension initiated the current mute
-        extensionInitiatedMute: false,
+        // Set of source identifiers that have requested mute
+        // e.g. "twitch-123", "peacock-456"
+        activeMuteSources: new Set(),
         // Whether we're waiting for a status response before muting
         pendingMuteCheck: false,
+        // Which source initiated the pending mute check
+        pendingMuteSource: null,
         // The system mute state before we muted (for restoration)
         preMuteState: null,
         // Count of failed operations to avoid repeated failures
@@ -92,6 +102,44 @@
     const RECONNECT_INITIAL_DELAY_MS = 1000;
     const RECONNECT_MAX_DELAY_MS = 30000;
     const RECONNECT_MAX_ATTEMPTS = 10;
+
+    // =========================================================================
+    // Peacock Ad Detection (Network-Based)
+    // =========================================================================
+
+    /**
+     * URL patterns for ad tracking beacons monitored via webRequest.
+     * These domains are unambiguously ad-related -- they only fire during ad playback.
+     */
+    const PEACOCK_AD_URL_PATTERNS = [
+        '*://*.fwmrm.net/*',
+        '*://*.moatads.com/*',
+        '*://*.doubleverify.com/*'
+    ];
+
+    /**
+     * Configuration for Peacock ad detection timing
+     */
+    const PEACOCK_CONFIG = {
+        // Milliseconds of silence (no ad beacons) before declaring ad break over.
+        // Peacock's own config has returnFromAdBreakDelay: 4000. We use 8s to
+        // bridge gaps between ads in a pod and account for beacon delivery delays.
+        AD_END_TIMEOUT_MS: 8000,
+
+        // Minimum number of beacons within BEACON_WINDOW_MS to confirm an ad break.
+        // Prevents a single stray request from causing a false mute.
+        BEACON_THRESHOLD: 2,
+
+        // Time window (ms) in which BEACON_THRESHOLD beacons must arrive.
+        BEACON_WINDOW_MS: 3000
+    };
+
+    /**
+     * Per-tab Peacock ad detection state.
+     * Key: tabId (number)
+     * Value: { adActive, timeoutId, lastBeaconTime, beaconCount, firstBeaconTime }
+     */
+    const peacockAdState = new Map();
 
     // Badge colors
     const BADGE_COLOR_ERROR = '#D93025';
@@ -253,17 +301,20 @@
 
             // Handle pending mute check
             if (muteState.pendingMuteCheck) {
+                var pendingSource = muteState.pendingMuteSource;
                 muteState.pendingMuteCheck = false;
+                muteState.pendingMuteSource = null;
                 muteState.preMuteState = message.muted;
 
                 if (message.muted) {
                     // System is already muted by user, do not override
                     logState('System already muted by user, skipping extension mute');
-                    muteState.extensionInitiatedMute = false;
                 } else {
                     // System is not muted, proceed with muting
-                    logState('System not muted, proceeding with extension mute');
-                    muteState.extensionInitiatedMute = true;
+                    logState('System not muted, proceeding with extension mute (source: ' + pendingSource + ')');
+                    if (pendingSource) {
+                        muteState.activeMuteSources.add(pendingSource);
+                    }
                     sendCommandToNativeHostDirect('mute');
                 }
             }
@@ -425,20 +476,30 @@
     }
 
     /**
-     * Handles mute request with user state preservation
-     * First queries mute status, then only mutes if system is not already muted
+     * Handles mute request with user state preservation.
+     * First queries mute status, then only mutes if system is not already muted.
+     * Uses reference-counted sources to support multiple simultaneous mute requests.
      * @param {Object} sender - Sender information for tab mute fallback
+     * @param {string} sourceId - Identifier for the mute source (e.g. "twitch-123", "peacock-456")
      */
-    function handleMuteRequest(sender) {
+    function handleMuteRequest(sender, sourceId) {
         // Track the tab for potential fallback
         if (sender && sender.tab) {
             muteState.activeTabId = sender.tab.id;
+        }
+
+        // If we already have active mute sources, system is already muted by us
+        if (muteState.activeMuteSources.size > 0) {
+            logState('Adding mute source: ' + sourceId + ' (already muted by extension)');
+            muteState.activeMuteSources.add(sourceId);
+            return;
         }
 
         // Check if we're in degraded mode (too many failures)
         if (muteState.degradedMode || muteState.failedOperations >= muteState.maxFailedOperations) {
             logState('In degraded mode, using tab mute fallback');
             muteState.degradedMode = true;
+            muteState.activeMuteSources.add(sourceId);
             muteTabFallback(true);
             return;
         }
@@ -446,33 +507,38 @@
         // Check if native host is connected
         if (!connectionState.isConnected || !connectionState.port) {
             logState('Native host not connected, attempting connection and using tab mute fallback');
+            muteState.activeMuteSources.add(sourceId);
             connectToNativeHost();
             muteTabFallback(true);
             return;
         }
 
         // Query current mute status before muting
-        logState('Checking system mute status before muting');
+        logState('Checking system mute status before muting (source: ' + sourceId + ')');
         muteState.pendingMuteCheck = true;
+        muteState.pendingMuteSource = sourceId;
         sendCommandToNativeHost('getStatus');
     }
 
     /**
-     * Handles unmute request with user state preservation
-     * Only unmutes if the extension initiated the mute
+     * Handles unmute request with user state preservation.
+     * Only unmutes if all mute sources have been removed.
      * @param {Object} sender - Sender information for tab mute fallback
+     * @param {string} sourceId - Identifier for the mute source to remove
      */
-    function handleUnmuteRequest(sender) {
-        // Handle tab mute fallback if we're in degraded mode
-        if (muteState.degradedMode) {
-            muteTabFallback(false);
-            muteState.extensionInitiatedMute = false;
+    function handleUnmuteRequest(sender, sourceId) {
+        muteState.activeMuteSources.delete(sourceId);
+
+        // Only unmute if no more active mute sources
+        if (muteState.activeMuteSources.size > 0) {
+            logState('Removing mute source: ' + sourceId +
+                     ', remaining sources: ' + muteState.activeMuteSources.size);
             return;
         }
 
-        // Only unmute if we were the ones who muted
-        if (!muteState.extensionInitiatedMute) {
-            logState('Extension did not initiate mute, skipping unmute (preserving user mute state)');
+        // Handle tab mute fallback if we're in degraded mode
+        if (muteState.degradedMode) {
+            muteTabFallback(false);
             return;
         }
 
@@ -480,13 +546,11 @@
         if (!connectionState.isConnected || !connectionState.port) {
             logState('Native host not connected, using tab unmute fallback');
             muteTabFallback(false);
-            muteState.extensionInitiatedMute = false;
             return;
         }
 
-        logState('Extension initiated mute detected, sending unmute command');
+        logState('All mute sources cleared, sending unmute command');
         sendCommandToNativeHost('unmute');
-        muteState.extensionInitiatedMute = false;
     }
 
     /**
@@ -508,6 +572,156 @@
             });
     }
 
+    // =========================================================================
+    // Peacock Ad Detection via webRequest
+    // =========================================================================
+
+    /**
+     * Handles an ad tracking beacon request detected via webRequest.
+     * Called for every request matching PEACOCK_AD_URL_PATTERNS.
+     * Only processes requests originating from Peacock tabs.
+     * @param {Object} details - webRequest details object
+     */
+    function handlePeacockAdBeacon(details) {
+        // Ignore requests not associated with a tab
+        if (details.tabId < 0) {
+            return;
+        }
+
+        var tabId = details.tabId;
+        var now = Date.now();
+
+        log('Peacock ad beacon from tab ' + tabId + ': ' + details.url.substring(0, 120));
+
+        // Verify this is actually a Peacock tab
+        browser.tabs.get(tabId).then(function(tab) {
+            if (!tab.url || !tab.url.includes('peacocktv.com')) {
+                return;
+            }
+
+            processPeacockBeacon(tabId, now);
+        }).catch(function() {
+            // Tab may have been closed
+        });
+    }
+
+    /**
+     * Processes a confirmed Peacock ad beacon for the given tab.
+     * Manages per-tab state, beacon thresholds, and mute/unmute timing.
+     * @param {number} tabId - The tab ID
+     * @param {number} now - Current timestamp
+     */
+    function processPeacockBeacon(tabId, now) {
+        // Get or create state for this tab
+        var tabState = peacockAdState.get(tabId);
+        if (!tabState) {
+            tabState = {
+                adActive: false,
+                timeoutId: null,
+                lastBeaconTime: 0,
+                beaconCount: 0,
+                firstBeaconTime: now
+            };
+            peacockAdState.set(tabId, tabState);
+        }
+
+        tabState.lastBeaconTime = now;
+        tabState.beaconCount++;
+
+        // If ad is already active, just reset the timeout
+        if (tabState.adActive) {
+            resetPeacockAdTimeout(tabId, tabState);
+            return;
+        }
+
+        // Ad not yet active -- check if we've hit the beacon threshold
+        if (tabState.beaconCount >= PEACOCK_CONFIG.BEACON_THRESHOLD &&
+            (now - tabState.firstBeaconTime) <= PEACOCK_CONFIG.BEACON_WINDOW_MS) {
+
+            // Confirmed ad break
+            tabState.adActive = true;
+            var sourceId = 'peacock-' + tabId;
+            logState('Peacock ad break detected on tab ' + tabId +
+                     ' (beacons: ' + tabState.beaconCount + ')');
+
+            var syntheticSender = { tab: { id: tabId } };
+            handleMuteRequest(syntheticSender, sourceId);
+            resetPeacockAdTimeout(tabId, tabState);
+
+        } else if (tabState.beaconCount === 1) {
+            // First beacon -- record timestamp for threshold window
+            tabState.firstBeaconTime = now;
+        }
+    }
+
+    /**
+     * Resets the timeout that will declare a Peacock ad break over.
+     * Each new beacon pushes the timeout forward.
+     * @param {number} tabId
+     * @param {Object} tabState
+     */
+    function resetPeacockAdTimeout(tabId, tabState) {
+        if (tabState.timeoutId !== null) {
+            clearTimeout(tabState.timeoutId);
+        }
+
+        tabState.timeoutId = setTimeout(function() {
+            onPeacockAdEnd(tabId);
+        }, PEACOCK_CONFIG.AD_END_TIMEOUT_MS);
+    }
+
+    /**
+     * Called when the ad-end timeout expires (no beacons for AD_END_TIMEOUT_MS).
+     * Triggers unmute and resets per-tab state.
+     * @param {number} tabId
+     */
+    function onPeacockAdEnd(tabId) {
+        var tabState = peacockAdState.get(tabId);
+        if (!tabState || !tabState.adActive) {
+            return;
+        }
+
+        var sourceId = 'peacock-' + tabId;
+        logState('Peacock ad break ended on tab ' + tabId +
+                 ' (total beacons: ' + tabState.beaconCount + ')');
+
+        tabState.adActive = false;
+        tabState.timeoutId = null;
+        tabState.beaconCount = 0;
+
+        var syntheticSender = { tab: { id: tabId } };
+        handleUnmuteRequest(syntheticSender, sourceId);
+    }
+
+    /**
+     * Cleans up Peacock ad state when a tab is closed.
+     * If an ad was active on the closed tab, triggers unmute.
+     * @param {number} tabId
+     */
+    function cleanupPeacockTab(tabId) {
+        var tabState = peacockAdState.get(tabId);
+        if (!tabState) {
+            return;
+        }
+
+        if (tabState.timeoutId !== null) {
+            clearTimeout(tabState.timeoutId);
+        }
+
+        if (tabState.adActive) {
+            var sourceId = 'peacock-' + tabId;
+            logState('Peacock tab ' + tabId + ' closed during ad, triggering unmute');
+            var syntheticSender = { tab: { id: tabId } };
+            handleUnmuteRequest(syntheticSender, sourceId);
+        }
+
+        peacockAdState.delete(tabId);
+    }
+
+    // =========================================================================
+    // Content Script Message Handling
+    // =========================================================================
+
     /**
      * Handles messages from content scripts and popup
      * @param {Object} message - Message from content script or popup
@@ -523,15 +737,18 @@
             return false;
         }
 
+        // Build source identifier from content script sender
+        var contentSourceId = sender && sender.tab ? 'twitch-' + sender.tab.id : 'twitch-unknown';
+
         switch (message.action) {
             case 'mute':
-                logState('Mute request received');
-                handleMuteRequest(sender);
+                logState('Mute request received from content script (source: ' + contentSourceId + ')');
+                handleMuteRequest(sender, contentSourceId);
                 break;
 
             case 'unmute':
-                logState('Unmute request received');
-                handleUnmuteRequest(sender);
+                logState('Unmute request received from content script (source: ' + contentSourceId + ')');
+                handleUnmuteRequest(sender, contentSourceId);
                 break;
 
             case 'getStatus':
@@ -548,7 +765,7 @@
                     maxReconnectAttempts: RECONNECT_MAX_ATTEMPTS,
                     lastError: connectionState.lastError,
                     degradedMode: muteState.degradedMode,
-                    extensionInitiatedMute: muteState.extensionInitiatedMute
+                    extensionInitiatedMute: muteState.activeMuteSources.size > 0
                 });
                 return true;
 
@@ -566,9 +783,17 @@
             case 'resetMuteState':
                 // Allow manual reset of mute state tracking
                 logState('Manual mute state reset requested');
-                muteState.extensionInitiatedMute = false;
+                muteState.activeMuteSources.clear();
                 muteState.pendingMuteCheck = false;
+                muteState.pendingMuteSource = null;
                 muteState.preMuteState = null;
+                // Also reset all Peacock ad state
+                peacockAdState.forEach(function(tabState) {
+                    if (tabState.timeoutId !== null) {
+                        clearTimeout(tabState.timeoutId);
+                    }
+                });
+                peacockAdState.clear();
                 sendResponse({ success: true });
                 return true;
 
@@ -617,12 +842,22 @@
     function init() {
         logState('Background script initialized');
 
-        // Register message listener for content scripts
+        // Register message listener for content scripts (Twitch)
         browser.runtime.onMessage.addListener(handleContentScriptMessage);
 
         // Register lifecycle event listeners
         browser.runtime.onInstalled.addListener(handleInstalled);
         browser.runtime.onStartup.addListener(handleStartup);
+
+        // Register Peacock ad detection via webRequest
+        browser.webRequest.onBeforeRequest.addListener(
+            handlePeacockAdBeacon,
+            { urls: PEACOCK_AD_URL_PATTERNS },
+            []
+        );
+
+        // Clean up Peacock state when tabs close
+        browser.tabs.onRemoved.addListener(cleanupPeacockTab);
 
         // Attempt initial connection to native host
         connectToNativeHost();
